@@ -1,25 +1,98 @@
 #!/bin/bash
-
-# List of folders to process
 folderToProccess=('ts' 'rust' 'react')
 buildDir=".build"
+AWS_BUCKET_NAME="blogs-mdbooks" # Set your bucket name here
 
-# Clean build directory before starting
-rm -rf "$buildDir"
-mkdir -p "$buildDir"
+golive() {
+    echo "🚀 Deploying to S3..."
 
-# Function to build docs
+    # Check if AWS credentials are configured
+    if ! aws sts get-caller-identity &>/dev/null; then
+        echo "❌ AWS credentials not configured!"
+        echo "   Run 'aws configure' to set up your credentials"
+        return 1
+    fi
+
+    # Initial sync
+    aws s3 sync "$buildDir/" "s3://$AWS_BUCKET_NAME/" \
+        --exact-timestamps \
+        --delete \
+        --exclude ".DS_Store"
+
+    echo "🔍 Verifying file integrity and fixing mismatches..."
+
+    local total_files=0
+    local mismatches=0
+    local reupload_failures=0
+
+    while IFS= read -r -d '' file; do
+        total_files=$((total_files + 1))
+        local rel_path="${file#$buildDir/}"
+        local local_md5=$(md5sum "$file" | awk '{print $1}')
+
+        # Get remote ETag/MD5
+        local remote_md5=$(aws s3api head-object \
+            --bucket "$AWS_BUCKET_NAME" \
+            --key "$rel_path" \
+            --query ETag \
+            --output text 2>/dev/null | tr -d '"')
+
+        if [[ "$local_md5" != "$remote_md5" ]]; then
+            mismatches=$((mismatches + 1))
+            echo "⚠ Mismatch: $rel_path (local: $local_md5, remote: $remote_md5)"
+            echo "🔄 Re-uploading: $rel_path"
+
+            # Re-upload the specific file
+            if aws s3 cp "$file" "s3://$AWS_BUCKET_NAME/$rel_path"; then
+                # Verify the re-upload
+                local new_remote_md5=$(aws s3api head-object \
+                    --bucket "$AWS_BUCKET_NAME" \
+                    --key "$rel_path" \
+                    --query ETag \
+                    --output text 2>/dev/null | tr -d '"')
+
+                if [[ "$local_md5" == "$new_remote_md5" ]]; then
+                    echo "✅ Successfully re-uploaded: $rel_path"
+                else
+                    echo "❌ Re-upload verification failed: $rel_path"
+                    reupload_failures=$((reupload_failures + 1))
+                fi
+            else
+                echo "❌ Failed to re-upload: $rel_path"
+                reupload_failures=$((reupload_failures + 1))
+            fi
+        else
+            echo "✅ Verified: $rel_path"
+        fi
+    done < <(find "$buildDir" -type f -print0)
+
+    echo ""
+    echo "📊 Verification Summary:"
+    echo "   Total files: $total_files"
+    echo "   Mismatches found: $mismatches"
+    echo "   Re-upload failures: $reupload_failures"
+
+    if [ "$reupload_failures" -eq 0 ]; then
+        echo "🎉 All files verified and synchronized successfully!"
+        return 0
+    else
+        echo "⚠ $reupload_failures file(s) failed to re-upload properly."
+        return 1
+    fi
+}
+
 buildDocs() {
     local folder="$1"
     cd "$folder" || return 1
-    mdbook build
+    mdbook build || return 1
     mkdir -p "../$buildDir/$folder"
-    mv book/* "../$buildDir/$folder/"
+    rsync -a book/ "../$buildDir/$folder/"
     cd - >/dev/null || return 1
 }
 
-# Build all projects
 buildApp() {
+    rm -rf "$buildDir"
+    mkdir -p "$buildDir"
     for item in "${folderToProccess[@]}"; do
         if [ -d "$item" ]; then
             echo "📚 Building: $item"
@@ -31,10 +104,9 @@ buildApp() {
     echo "✅ All builds complete. Output in $buildDir"
 }
 
-# Check system health
 checkHealth() {
     local status=0
-    local required_cmds=("mdbook" "mv" "mkdir" "cd")
+    local required_cmds=("mdbook" "mv" "mkdir" "cd" "aws")
 
     echo "🔍 Checking required utilities..."
     for cmd in "${required_cmds[@]}"; do
@@ -46,37 +118,95 @@ checkHealth() {
         fi
     done
 
-    if [ $status -eq 0 ]; then
-        echo "🎉 All required utilities are installed."
+    # Check AWS credentials and configuration
+    echo "🔍 Checking AWS configuration..."
+    if [ -f "$HOME/.aws/credentials" ]; then
+        echo "✅ Found: ~/.aws/credentials"
     else
-        echo "⚠ Please install the missing utilities before running the script."
+        echo "❌ Missing: ~/.aws/credentials"
+        echo "   Run 'aws configure' to set up your credentials"
+        status=1
+    fi
+
+    if [ -f "$HOME/.aws/config" ]; then
+        echo "✅ Found: ~/.aws/config"
+    else
+        echo "⚠ Missing: ~/.aws/config (optional)"
+    fi
+
+    # Test AWS credentials
+    if aws sts get-caller-identity &>/dev/null; then
+        local aws_account=$(aws sts get-caller-identity --query Account --output text 2>/dev/null)
+        local aws_user=$(aws sts get-caller-identity --query Arn --output text 2>/dev/null)
+        echo "✅ AWS credentials working"
+        echo "   Account: $aws_account"
+        echo "   User: $aws_user"
+    else
+        echo "❌ AWS credentials not working"
+        echo "   Run 'aws configure' to set up your credentials"
+        status=1
+    fi
+
+    # Check if S3 bucket is accessible
+    if aws s3 ls "s3://$AWS_BUCKET_NAME" &>/dev/null; then
+        echo "✅ S3 bucket accessible: $AWS_BUCKET_NAME"
+    else
+        echo "❌ S3 bucket not accessible: $AWS_BUCKET_NAME"
+        echo "   Check bucket name and permissions"
+        status=1
+    fi
+
+    if [ $status -eq 0 ]; then
+        echo "🎉 All required utilities and AWS configuration are ready."
+        echo "💡 S3 bucket: $AWS_BUCKET_NAME"
+    else
+        echo "⚠ Please fix the above issues before running the script."
     fi
     return $status
 }
 
-# Show help
 showHelp() {
     cat <<EOF
 Usage: $0 [command]
 
 Commands:
   build           Build all configured mdBook projects
-  --checkhealth   Check if all required utilities are available
+  --checkhealth   Check if all required utilities and AWS config are available
+  golive          Deploy to S3 with integrity verification and auto-repair
   --help          Show this help message
+
+Features:
+  • Uses standard AWS CLI credentials (~/.aws/credentials)
+  • Automatic re-upload of mismatched files
+  • Comprehensive integrity checking with MD5/ETag comparison
+  • Simple sequential processing
+
+Setup:
+  1. Configure AWS credentials: aws configure
+  2. Set your bucket name in the script: AWS_BUCKET_NAME="your-bucket-name"
 
 Examples:
   $0 build
   $0 --checkhealth
+  $0 golive
+
+AWS Configuration:
+  The script uses standard AWS CLI configuration files:
+  • ~/.aws/credentials (required)
+  • ~/.aws/config (optional)
+
 EOF
 }
 
-# Parse arguments
 case "$1" in
     build)
         buildApp
         ;;
     --checkhealth)
         checkHealth
+        ;;
+    golive)
+        golive
         ;;
     --help | "")
         showHelp
