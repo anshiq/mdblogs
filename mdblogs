@@ -4,7 +4,11 @@
 folderToProccess=('ts' 'rust' 'react')
 buildDir=".build"
 
-# Function to build a folder
+# Clean build directory before starting
+rm -rf "$buildDir"
+mkdir -p "$buildDir"
+
+# Function to build docs
 buildDocs() {
     local folder="$1"
     cd "$folder" || return 1
@@ -14,12 +18,72 @@ buildDocs() {
     cd - >/dev/null || return 1
 }
 
-# Loop over folders
-for item in "${folderToProccess[@]}"; do
-    if [ -d "$item" ]; then
-        echo "📚 Building: $item"
-        buildDocs "$item"
+# Build all projects
+buildApp() {
+    for item in "${folderToProccess[@]}"; do
+        if [ -d "$item" ]; then
+            echo "📚 Building: $item"
+            buildDocs "$item"
+        else
+            echo "⚠ Skipping: $item (not found)"
+        fi
+    done
+    echo "✅ All builds complete. Output in $buildDir"
+}
+
+# Check system health
+checkHealth() {
+    local status=0
+    local required_cmds=("mdbook" "mv" "mkdir" "cd")
+
+    echo "🔍 Checking required utilities..."
+    for cmd in "${required_cmds[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            echo "❌ Missing: $cmd"
+            status=1
+        else
+            echo "✅ Found: $cmd"
+        fi
+    done
+
+    if [ $status -eq 0 ]; then
+        echo "🎉 All required utilities are installed."
     else
-        echo "⚠ Skipping: $item (not found)"
+        echo "⚠ Please install the missing utilities before running the script."
     fi
-done
+    return $status
+}
+
+# Show help
+showHelp() {
+    cat <<EOF
+Usage: $0 [command]
+
+Commands:
+  build           Build all configured mdBook projects
+  --checkhealth   Check if all required utilities are available
+  --help          Show this help message
+
+Examples:
+  $0 build
+  $0 --checkhealth
+EOF
+}
+
+# Parse arguments
+case "$1" in
+    build)
+        buildApp
+        ;;
+    --checkhealth)
+        checkHealth
+        ;;
+    --help | "")
+        showHelp
+        ;;
+    *)
+        echo "❌ Unknown command: $1"
+        showHelp
+        exit 1
+        ;;
+esac
