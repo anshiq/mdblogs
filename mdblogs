@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# List of folders to process
+folderToProccess=('ts' 'rust' 'react')
+buildDir=".build"
+
+# Function to build a folder
+buildDocs() {
+    local folder="$1"
+    cd "$folder" || return 1
+    mdbook build
+    mkdir -p "../$buildDir/$folder"
+    mv book/* "../$buildDir/$folder/"
+    cd - >/dev/null || return 1
+}
+
+# Loop over folders
+for item in "${folderToProccess[@]}"; do
+    if [ -d "$item" ]; then
+        echo "📚 Building: $item"
+        buildDocs "$item"
+    else
+        echo "⚠ Skipping: $item (not found)"
+    fi
+done
